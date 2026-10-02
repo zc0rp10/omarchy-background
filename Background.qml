@@ -1,5 +1,6 @@
 import Quickshell
 import Quickshell.Io
+import Quickshell.Hyprland
 import Quickshell.Wayland
 import QtQuick
 import QtQuick.Effects
@@ -176,7 +177,72 @@ Item {
     }
   }
 
-  Component.onCompleted: refreshBackground()
+  Component.onCompleted: {
+    refreshBackground()
+    Hyprland.refreshToplevels()
+  }
+
+  // --- Music visualizer (bjfa) ---
+  readonly property string themeColorsPath: stateHome + "/omarchy/current/theme/colors.toml"
+  property color waveStart: "#f5c2e7"
+  property color waveEnd: "#89b4fa"
+
+  function themeColor(raw, key, fallback) {
+    var m = String(raw).match(new RegExp("^\\s*" + key + "\\s*=\\s*\"(#[0-9a-fA-F]{6})\"", "m"))
+    return m ? m[1] : fallback
+  }
+
+  function loadWaveColors(raw) {
+    waveStart = themeColor(raw, "magenta", themeColor(raw, "color5", waveStart))
+    waveEnd = themeColor(raw, "accent", themeColor(raw, "blue", themeColor(raw, "color4", waveEnd)))
+  }
+
+  FileView {
+    id: themeColorsFile
+    path: root.themeColorsPath
+    watchChanges: true
+    onFileChanged: reload()
+    onLoaded: root.loadWaveColors(text())
+  }
+
+  AudioSpectrum {
+    id: audioSpectrum
+  }
+
+  // Waves fully faded in: they are opaque, so the wallpaper images below are skipped.
+  readonly property bool wavesCover: audioSpectrum.energy * 1.2 >= 1
+
+  // Window floating state comes from Hyprland's client list; refresh it when
+  // windows come, go, move or change floating mode.
+  readonly property var toplevelEvents: ["openwindow", "closewindow", "movewindow", "movewindowv2", "changefloatingmode", "fullscreen"]
+
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (root.toplevelEvents.indexOf(event.name) >= 0) Hyprland.refreshToplevels()
+    }
+  }
+
+  // Plain fill in the wallpaper's own ground colour; covers the wallpaper's
+  // artwork while the live waves play so the two don't stack.
+  property color wallpaperGround: Color.background
+
+  Process {
+    id: groundProc
+    command: ["magick", root.currentBackground + "[0]", "-format", "%[hex:p{8,8}]", "info:"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var hex = String(text || "").trim()
+        if (/^[0-9A-Fa-f]{6}/.test(hex)) root.wallpaperGround = "#" + hex.substring(0, 6)
+      }
+    }
+  }
+
+  // A theme switch replaces the theme folder, which can drop the file watch.
+  onCurrentBackgroundChanged: {
+    themeColorsFile.reload()
+    if (currentBackground) groundProc.running = true
+  }
 
   Variants {
     model: Quickshell.screens
@@ -193,7 +259,11 @@ Item {
         id: remapGuard
         window: panel
       }
-      color: "transparent"
+      // The wallpaper's ground colour as the window colour. The window is then
+      // created without an alpha channel: while the waves play, Qt's per-frame
+      // clear already paints the ground (no full-screen fill on top of it) and
+      // the compositor knows the surface is opaque.
+      color: root.wallpaperGround
       // Keep render updates enabled. The background layer has been observed to
       // lose its committed buffer while parked with updatesEnabled=false,
       // leaving a black desktop until omarchy-shell is restarted. The wallpaper
@@ -221,6 +291,7 @@ Item {
       Image {
         id: base
         anchors.fill: parent
+        visible: !root.wavesCover
         source: root.imageUrl(root.displayedBackground)
         fillMode: Image.PreserveAspectCrop
         asynchronous: true
@@ -243,14 +314,14 @@ Item {
         cache: false
         smooth: true
         mipmap: true
-        visible: root.oldBackground !== "" && root.revealProgress < 1
+        visible: root.oldBackground !== "" && root.revealProgress < 1 && !root.wavesCover
         onStatusChanged: panel.maybeStartReveal()
       }
 
       Item {
         id: incomingLayer
         anchors.fill: parent
-        visible: root.incomingBackground !== "" && incomingFrame.status === Image.Ready && (root.revealProgress >= 1 || panel.maskReady)
+        visible: root.incomingBackground !== "" && incomingFrame.status === Image.Ready && (root.revealProgress >= 1 || panel.maskReady) && !root.wavesCover
         layer.enabled: root.incomingBackground !== "" && root.revealProgress < 1
         layer.smooth: true
         layer.effect: MultiEffect {
@@ -271,6 +342,48 @@ Item {
           mipmap: true
           onStatusChanged: panel.maybeStartReveal()
         }
+      }
+
+      // True when a tiled (or fullscreen) non-terminal window sits on this
+      // screen's workspace, so the desktop is hidden and the waves need not
+      // animate. Terminals and TUIs (Omarchy tags them "terminal") are
+      // see-through, so the waves keep running behind them, as they do behind
+      // floating windows.
+      readonly property var hyprMonitor: Hyprland.monitorFor(modelData)
+      readonly property bool desktopCovered: {
+        var ws = hyprMonitor ? hyprMonitor.activeWorkspace : null
+        if (!ws) return false
+        var windows = ws.toplevels.values
+        for (var i = 0; i < windows.length; i++) {
+          var ipc = windows[i].lastIpcObject
+          if (!ipc || !ipc.class) return true   // not refreshed yet: assume opaque
+          if (ipc.floating) continue
+          var tags = ipc.tags || []
+          var terminal = false
+          for (var j = 0; j < tags.length; j++)
+            if (String(tags[j]).replace(/\*$/, "") === "terminal") terminal = true
+          if (!terminal) return true
+        }
+        return false
+      }
+
+      // Ground fill in the wallpaper's own colour, faded in with the waves so
+      // the artwork and the strands never stack. Only drawn during the fade:
+      // once the waves cover the screen the window's clear colour is the same
+      // ground, so this would be a full-screen fill repeated every frame.
+      Rectangle {
+        anchors.fill: parent
+        color: root.wallpaperGround
+        opacity: Math.min(1, audioSpectrum.energy * 1.2)
+        visible: opacity > 0.01 && !root.wavesCover
+      }
+
+      AudioWaves {
+        anchors.fill: parent
+        spectrum: audioSpectrum
+        colorStart: root.waveStart
+        colorEnd: root.waveEnd
+        live: !panel.desktopCovered
       }
 
       Item {

@@ -4,7 +4,7 @@
   "name": "My Background",
   "version": "1.0.0",
   "author": "Omarchy",
-  "description": "Desktop background renderer with click handling and transitions",
+  "description": "Desktop background with a music visualizer: theme-coloured waves driven by cava over the wallpaper",
   "kinds": [
     "service"
   ],
