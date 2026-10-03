@@ -4,7 +4,6 @@
 
 layout(location = 0) in float vEdge;
 layout(location = 1) in float vU;
-layout(location = 2) in float vGap;
 layout(location = 0) out vec4 fragColor;
 
 layout(std140, binding = 0) uniform buf {
@@ -27,7 +26,6 @@ layout(std140, binding = 0) uniform buf {
 };
 
 void main() {
-  if (vGap > 0.5) discard;   // space between two strands
   float halfW = lineWidth * 0.5;
   float dist = abs(vEdge) * (halfW + pixel);   // distance from the centre line
   float cover = 1.0 - smoothstep(halfW - pixel * 0.5, halfW + pixel * 0.5, dist);

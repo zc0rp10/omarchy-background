@@ -4,7 +4,7 @@
   "name": "My Background",
   "version": "1.0.0",
   "author": "Omarchy",
-  "description": "Desktop background with a music visualizer: theme-coloured waves driven by cava over the wallpaper",
+  "description": "Desktop background with a music visualizer: while audio plays, the wallpaper fades to its own ground colour and theme-coloured waves driven by cava move across it",
   "kinds": [
     "service"
   ],

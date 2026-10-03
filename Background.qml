@@ -77,6 +77,9 @@ Item {
     if (pendingThemeVersion < 0) return
     pendingThemeFallbackTimer.stop()
     Color.loadColors(pendingColorsRaw)
+    // Wave colours too: the wallpaper path can stay the same across a switch
+    // (many themes ship "omarchy.png"), so its change handler isn't enough.
+    if (pendingColorsRaw) loadWaveColors(pendingColorsRaw)
     // Color.loadShell also refreshes Style so the type scale flips with the
     // background reveal instead of waiting for a separate reload path.
     Color.loadShell(pendingShellRaw)
@@ -192,9 +195,67 @@ Item {
     return m ? m[1] : fallback
   }
 
+  // Colour helpers for picking the wave gradient (channels 0..1).
+  function rgbOf(hex) {
+    return [parseInt(hex.substr(1, 2), 16) / 255, parseInt(hex.substr(3, 2), 16) / 255, parseInt(hex.substr(5, 2), 16) / 255]
+  }
+  function chromaOf(hex) { var c = rgbOf(hex); return Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2]) }
+  function hueOf(hex) {
+    var c = rgbOf(hex), mx = Math.max(c[0], c[1], c[2]), d = mx - Math.min(c[0], c[1], c[2])
+    if (d === 0) return 0
+    var h = mx === c[0] ? (c[1] - c[2]) / d : mx === c[1] ? 2 + (c[2] - c[0]) / d : 4 + (c[0] - c[1]) / d
+    return ((h * 60) + 360) % 360
+  }
+  function hueDist(a, b) { var d = Math.abs(hueOf(a) - hueOf(b)); return Math.min(d, 360 - d) }
+  function colourDist(a, b) {
+    var x = rgbOf(a), y = rgbOf(b)
+    return Math.sqrt(Math.pow(x[0] - y[0], 2) + Math.pow(x[1] - y[1], 2) + Math.pow(x[2] - y[2], 2))
+  }
+  function luminance(hex) {
+    var c = rgbOf(hex).map(function(v) { return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) })
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+  }
+  function contrastOf(a, b) {
+    var la = luminance(a), lb = luminance(b)
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+  }
+
+  // Wave gradient: the theme's magenta -> accent, which suits nearly every
+  // theme. Only when that pair is grey or (nearly) the same colour, as in
+  // solitude and lumon, use the theme's most colourful palette colour into a
+  // second one of a different hue (or, failing that, its brightest colour).
+  // Tested against all installed themes: only solitude, lumon, vantablack and
+  // white change, and the last two stay greyscale.
   function loadWaveColors(raw) {
-    waveStart = themeColor(raw, "magenta", themeColor(raw, "color5", waveStart))
-    waveEnd = themeColor(raw, "accent", themeColor(raw, "blue", themeColor(raw, "color4", waveEnd)))
+    // Missing keys fall back to fixed defaults, never to the previous theme's.
+    var m = themeColor(raw, "magenta", themeColor(raw, "color5", "#f5c2e7"))
+    var a = themeColor(raw, "accent", themeColor(raw, "blue", themeColor(raw, "color4", "#89b4fa")))
+    var flat = (chromaOf(m) < 0.12 && chromaOf(a) < 0.12) || colourDist(m, a) < 0.12
+    if (flat) {
+      var bg = themeColor(raw, "background", "#000000")
+      var keys = ["red", "yellow", "green", "cyan", "blue", "magenta", "accent", "bright_red", "bright_yellow",
+                  "bright_green", "bright_cyan", "bright_blue", "bright_magenta"]
+      var cands = []
+      for (var i = 0; i < keys.length; i++) {
+        var v = themeColor(raw, keys[i], "")
+        if (v !== "" && cands.indexOf(v.toLowerCase()) < 0 && contrastOf(v, bg) >= 2.2) cands.push(v.toLowerCase())
+      }
+      if (cands.length > 0) {
+        cands.sort(function(x, y) { return chromaOf(y) - chromaOf(x) })
+        var first = cands[0], second = ""
+        for (var j = 1; j < cands.length && second === ""; j++)
+          if (hueDist(first, cands[j]) >= 40 && chromaOf(cands[j]) >= 0.12) second = cands[j]
+        if (second === "") {
+          var rest = cands.length > 1 ? cands.slice(1) : [themeColor(raw, "foreground", first)]
+          second = rest[0]
+          for (var k = 1; k < rest.length; k++) if (luminance(rest[k]) > luminance(second)) second = rest[k]
+        }
+        m = first
+        a = second
+      }
+    }
+    waveStart = m
+    waveEnd = a
   }
 
   FileView {
@@ -205,16 +266,34 @@ Item {
     onLoaded: root.loadWaveColors(text())
   }
 
+  // Non-terminal windows the waves keep running behind, like terminals: they
+  // share the terminals' translucent default opacity and a dark ground.
+  readonly property var seeThroughClasses: ["dev.zed.Zed"]
+
+  // Screens whose desktop is visible (not covered by a tiled non-terminal
+  // window). With none, nobody can see the waves: cava and the frame loop stop.
+  property var liveScreens: ({})
+  readonly property bool anyScreenLive: Object.keys(liveScreens).some(function(k) { return liveScreens[k] })
+
+  function setScreenLive(name, live) {
+    var next = Object.assign({}, liveScreens)
+    if (live === undefined) delete next[name]
+    else next[name] = live
+    liveScreens = next
+  }
+
   AudioSpectrum {
     id: audioSpectrum
+    wanted: root.anyScreenLive
   }
 
   // Waves fully faded in: they are opaque, so the wallpaper images below are skipped.
   readonly property bool wavesCover: audioSpectrum.energy * 1.2 >= 1
 
   // Window floating state comes from Hyprland's client list; refresh it when
-  // windows come, go, move or change floating mode.
-  readonly property var toplevelEvents: ["openwindow", "closewindow", "movewindow", "movewindowv2", "changefloatingmode", "fullscreen"]
+  // windows come, go, move or change floating mode. (Hyprland sends both
+  // movewindow and movewindowv2 for one move; listen to one.)
+  readonly property var toplevelEvents: ["openwindow", "closewindow", "movewindowv2", "changefloatingmode", "fullscreen"]
 
   Connections {
     target: Hyprland
@@ -227,21 +306,41 @@ Item {
   // artwork while the live waves play so the two don't stack.
   property color wallpaperGround: Color.background
 
+  // The ground is the wallpaper's dominant colour: shrunk, reduced to 6
+  // colours, most common one wins. Stable for flat-ground art and photos
+  // alike, unlike a single corner pixel (which the crop may even hide).
   Process {
     id: groundProc
-    command: ["magick", root.currentBackground + "[0]", "-format", "%[hex:p{8,8}]", "info:"]
+    property bool pending: false
+    // First output line is the sampled path, so a result that arrives after
+    // the wallpaper changed again is recognised as stale and ignored.
+    command: ["bash", "-c", "printf '%s\\n' \"$1\"; magick \"$1[0]\" -scale 64x64! -colors 6 -depth 8 -format %c histogram:info:-",
+              "sample-ground", root.currentBackground]
     stdout: StdioCollector {
       onStreamFinished: {
-        var hex = String(text || "").trim()
-        if (/^[0-9A-Fa-f]{6}/.test(hex)) root.wallpaperGround = "#" + hex.substring(0, 6)
+        var lines = String(text || "").split("\n")
+        if (lines[0] !== root.currentBackground) return
+        var best = 0, hex = ""
+        for (var i = 1; i < lines.length; i++) {
+          var m = lines[i].match(/^\s*(\d+):.*(#[0-9A-Fa-f]{6})/)
+          if (m && parseInt(m[1]) > best) { best = parseInt(m[1]); hex = m[2] }
+        }
+        root.wallpaperGround = hex !== "" ? hex : Color.background
       }
     }
+    onExited: if (pending) { pending = false; running = true }
+  }
+
+  function sampleGround() {
+    if (!currentBackground) return
+    if (groundProc.running) groundProc.pending = true
+    else groundProc.running = true
   }
 
   // A theme switch replaces the theme folder, which can drop the file watch.
   onCurrentBackgroundChanged: {
     themeColorsFile.reload()
-    if (currentBackground) groundProc.running = true
+    sampleGround()
   }
 
   Variants {
@@ -346,10 +445,13 @@ Item {
 
       // True when a tiled (or fullscreen) non-terminal window sits on this
       // screen's workspace, so the desktop is hidden and the waves need not
-      // animate. Terminals and TUIs (Omarchy tags them "terminal") are
-      // see-through, so the waves keep running behind them, as they do behind
-      // floating windows.
+      // animate. Terminals and TUIs (Omarchy tags them "terminal") and the
+      // seeThroughClasses are see-through, so the waves keep running behind
+      // them, as they do behind floating windows.
       readonly property var hyprMonitor: Hyprland.monitorFor(modelData)
+      onDesktopCoveredChanged: root.setScreenLive(modelData.name, !desktopCovered)
+      Component.onCompleted: root.setScreenLive(modelData.name, !desktopCovered)
+      Component.onDestruction: root.setScreenLive(modelData.name, undefined)
       readonly property bool desktopCovered: {
         var ws = hyprMonitor ? hyprMonitor.activeWorkspace : null
         if (!ws) return false
@@ -358,6 +460,7 @@ Item {
           var ipc = windows[i].lastIpcObject
           if (!ipc || !ipc.class) return true   // not refreshed yet: assume opaque
           if (ipc.floating) continue
+          if (root.seeThroughClasses.indexOf(ipc.class) >= 0) continue
           var tags = ipc.tags || []
           var terminal = false
           for (var j = 0; j < tags.length; j++)

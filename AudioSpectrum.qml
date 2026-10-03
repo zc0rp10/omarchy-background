@@ -10,7 +10,7 @@ import QtQuick
 Item {
   id: spectrum
 
-  readonly property string configPath: String(Qt.resolvedUrl("cava.conf")).replace(/^file:\/\//, "")
+  readonly property string configPath: decodeURIComponent(String(Qt.resolvedUrl("cava.conf")).replace(/^file:\/\//, ""))
   // cava bar ranges per band (48 log-spaced bars, 40 Hz - 12 kHz)
   readonly property var bandRanges: [[0, 8], [8, 18], [18, 32], [32, 48]]
   readonly property var phaseSpeed: [0.35, -0.5, 0.8, -1.1]   // rad/s at rest
@@ -44,7 +44,9 @@ Item {
   property real b1: 0
   property real b2: 0
   property real b3: 0
-  property vector4d bands: Qt.vector4d(b0, b1, b2, b3)
+  // Assigned once per frame in step(): a binding over b0..b3 would fire four
+  // change signals (and four amp recomputes per screen) every frame.
+  property vector4d bands: Qt.vector4d(0, 0, 0, 0)
   property vector4d phase: Qt.vector4d(0, 1.3, 2.1, 0.7)
   property real energy: 0
 
@@ -58,6 +60,10 @@ Item {
   // Off entirely on the power-saver profile (on battery): cava is stopped and
   // the waves fade out, leaving the normal wallpaper.
   readonly property bool allowed: PowerProfiles.profile !== PowerProfile.PowerSaver
+  // Set by Background.qml: false while every screen is covered by windows, so
+  // nobody can see the waves. cava and the frame loop pause until one shows.
+  property bool wanted: true
+  readonly property bool active: allowed && wanted
   // Stays true through short quiet passages so the waves don't flicker out.
   readonly property bool hasSignal: holdTimer.running
 
@@ -79,7 +85,10 @@ Item {
     var f3 = Math.max(0, next[3] - prevTargets[3])
     prevTargets = next
     // Build-ups show up as more change in the mids/highs (rolls, risers, hats).
-    fluxPending += f0 * 0.5 + f1 + f2 * 1.2 + f3 * 1.5
+    // Only collect change while frames consume it; otherwise noise piles up
+    // and bursts into drive (and inflates fluxLong) when frames resume.
+    if (frameLoop.running) fluxPending += f0 * 0.5 + f1 + f2 * 1.2 + f3 * 1.5
+    else fluxPending = 0
 
     targets = next
     if (sum > 0.002) holdTimer.restart()
@@ -100,6 +109,7 @@ Item {
     b1 = follow(b1, targets[1], dt)
     b2 = follow(b2, targets[2], dt)
     b3 = follow(b3, targets[3], dt)
+    bands = Qt.vector4d(b0, b1, b2, b3)
     var loud = Math.min(1, (b0 + b1 + b2 + b3) * 0.75)
     var fade = hasSignal ? 0.25 : 0.6
     energy += ((hasSignal ? 1 : 0) - energy) * (1 - Math.exp(-dt / fade))
@@ -130,26 +140,43 @@ Item {
 
   // Driven by the display's frame clock for smooth, vsync-aligned motion.
   FrameAnimation {
-    running: spectrum.hasSignal || spectrum.energy > 0
+    id: frameLoop
+    running: (spectrum.hasSignal || spectrum.energy > 0) && spectrum.wanted
     onTriggered: spectrum.step(Math.min(frameTime, 0.1))
   }
 
+  // cava is started and stopped imperatively in both directions. (A binding
+  // on `running` would be dropped by the first imperative restart, after which
+  // power-saver would no longer stop it.)
   Process {
     id: cava
     command: ["cava", "-p", spectrum.configPath]
-    running: spectrum.allowed
+    running: false
     stdout: SplitParser {
       onRead: data => spectrum.ingest(data)
     }
+    onStarted: startTimer.interval = 10000
     onRunningChanged: if (!running) holdTimer.stop()
   }
 
-  // cava missing or crashed (PipeWire restart): retry.
+  // Starts cava when it becomes active, and restarts it after it exits
+  // (PipeWire restart, resume). Backs off to 5 min if it keeps failing, for
+  // example when cava isn't installed.
   Timer {
+    id: startTimer
     interval: 10000
     repeat: true
-    running: spectrum.allowed && !cava.running
-    onTriggered: cava.running = true
+    triggeredOnStart: true
+    running: spectrum.active && !cava.running
+    onTriggered: {
+      cava.running = true
+      interval = Math.min(interval * 2, 300000)
+    }
+  }
+
+  Connections {
+    target: spectrum
+    function onActiveChanged() { if (!spectrum.active) cava.running = false }
   }
 }
 
