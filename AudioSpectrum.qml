@@ -187,7 +187,12 @@ Item {
 
   Connections {
     target: spectrum
-    function onActiveChanged() { if (!spectrum.active) cava.running = false }
+    // Resuming with the waves still up (paused behind windows): bridge the gap
+    // until cava's first frames, or they would fade out and straight back in.
+    function onActiveChanged() {
+      if (!spectrum.active) cava.running = false
+      else if (spectrum.energy > 0) holdTimer.restart()
+    }
     function onMusicPlayingChanged() {
       if (spectrum.musicPlaying) {
         musicOffTimer.stop()
