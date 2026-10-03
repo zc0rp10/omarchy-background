@@ -1,5 +1,6 @@
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Mpris
 import Quickshell.Services.UPower
 import QtQuick
 
@@ -63,7 +64,17 @@ Item {
   // Set by Background.qml: false while every screen is covered by windows, so
   // nobody can see the waves. cava and the frame loop pause until one shows.
   property bool wanted: true
-  readonly property bool active: allowed && wanted
+  // Only music drives the waves: a Spotify client (the official app,
+  // spotify_player or ncspot) must be playing. Videos, calls and the rest of
+  // the desktop's sound leave the plain wallpaper.
+  readonly property var musicPlayerPattern: /spotify|ncspot/i
+  readonly property bool musicPlaying: (Mpris.players ? Mpris.players.values : []).some(function(p) {
+    return p.isPlaying && spectrum.musicPlayerPattern.test((p.dbusName || "") + " " + (p.identity || "") + " " + (p.desktopEntry || ""))
+  })
+  // Lags musicPlaying going off by a few seconds, so a track change or a short
+  // pause doesn't restart cava; the waves still fade as the sound stops.
+  property bool musicLive: false
+  readonly property bool active: allowed && wanted && musicLive
   // Stays true through short quiet passages so the waves don't flicker out.
   readonly property bool hasSignal: holdTimer.running
 
@@ -177,6 +188,22 @@ Item {
   Connections {
     target: spectrum
     function onActiveChanged() { if (!spectrum.active) cava.running = false }
+    function onMusicPlayingChanged() {
+      if (spectrum.musicPlaying) {
+        musicOffTimer.stop()
+        spectrum.musicLive = true
+      } else {
+        musicOffTimer.restart()
+      }
+    }
   }
+
+  Timer {
+    id: musicOffTimer
+    interval: 5000
+    onTriggered: spectrum.musicLive = false
+  }
+
+  Component.onCompleted: musicLive = musicPlaying
 }
 
